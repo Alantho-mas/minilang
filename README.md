@@ -52,11 +52,28 @@ print fruits[0]      # apple — positions start at 0
 print fruits + ["grapes"]
 ```
 
-Run it:
+Run it on a file:
 
 ```bash
 node minilang.js examples/hello.ml
 ```
+
+Or just run `node minilang.js` with no file to type MiniLang live:
+
+```
+$ node minilang.js
+minilang> x = 10
+minilang> print x * 2
+20
+minilang> if x bigger than 5
+... print "big"
+... end
+big
+minilang> 2 + 3
+5
+```
+
+In interactive mode, type `help` for a cheat sheet and `exit` to leave. Blocks like `if` and `recipe` span multiple lines — MiniLang waits patiently with `... ` until you finish with `end`.
 
 ## The Details (for the curious)
 
@@ -77,7 +94,7 @@ source code  →  tokenizer  →  tokens  →  parser  →  AST  →  interprete
 
 1. **Tokenizer** — scans characters into tokens (numbers, words in quotes, names, `print`, operators). Tracks line numbers for error messages.
 2. **Parser** — recursive descent over the grammar, builds an Abstract Syntax Tree. Operator precedence comes from the classic `expr → term → factor` chain.
-3. **Interpreter** — walks the tree, evaluates each piece, remembers variables. Catches mistakes like unknown names or dividing by zero.
+3. **Interpreter** — walks the tree, evaluates each piece, remembers variables in a persistent session (that's what makes interactive mode work). Catches mistakes like unknown names or dividing by zero.
 
 ## Grammar
 
@@ -95,7 +112,9 @@ comparison := additive ((bigger than | smaller than | equals | not equals) addit
 additive   := term (("+" | "-") term)*
 term       := factor (("*" | "/" | "%") factor)*
 factor     := "-" factor | primary
-primary    := NUMBER | STRING | IDENT | "(" expr ")"
+primary    := NUMBER | STRING | IDENT | callExpr | "(" expr ")"
+             | "[" (expr ("," expr)*)? "]" | primary "[" expr "]"
+callExpr   := IDENT arg+
 ```
 
 ## Try It
@@ -109,10 +128,12 @@ node minilang.js examples/recipes.ml    # reusable recipes
 node minilang.js examples/lists.ml      # lists
 ```
 
+Or skip files entirely: run `node minilang.js` and type away.
+
 ## Project Structure
 
 ```
-├── minilang.js      # the whole language: tokenizer, parser, interpreter
+├── minilang.js      # the whole language: tokenizer, parser, interpreter, REPL
 ├── examples/
 │   ├── hello.ml     # words & variables
 │   ├── math.ml      # maths & brackets
@@ -128,7 +149,7 @@ node minilang.js examples/lists.ml      # lists
 - ✅ **Stage 1:** values, variables, print, maths
 - ✅ **Stage 2:** decisions (`if`/`otherwise`) and loops (`repeat`), all in plain words
 - ✅ **Stage 3:** reusable `recipe` blocks (functions) with `give back`, and lists
-- **Stage 4:** interactive mode — type and see results instantly
+- ✅ **Stage 4:** interactive mode — type MiniLang live and see results instantly
 
 ## Tech Stack
 

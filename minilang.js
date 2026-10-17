@@ -6,23 +6,16 @@
  * Stage 1: store values (x = 10), show things (print "hi"), maths.
  * Stage 2: decisions (if/otherwise/end) and loops (repeat/end) in plain words.
  * Stage 3: reusable recipes (functions) with "give back", and lists.
+ * Stage 4: interactive mode — run with no file and type MiniLang live:
  *
- *   recipe greet name
- *     print "Hello, " + name + "!"
- *   end
+ *   $ node minilang.js
+ *   minilang> x = 10
+ *   minilang> print x * 2
+ *   20
+ *   minilang> 2 + 3
+ *   5
  *
- *   greet "Alan"
- *
- *   recipe add a b
- *     give back a + b
- *   end
- *
- *   print add 2 3
- *
- *   fruits = ["apple", "banana"]
- *   print fruits[0]
- *
- * Usage: node minilang.js <file.ml>
+ * Usage: node minilang.js [file.ml]
  */
 
 const fs = require('fs');
@@ -94,7 +87,6 @@ function tokenize(src) {
 // statement  := IDENT "=" expr | "print" expr | ifStmt | repeatStmt
 //             | recipeDef | "give" "back" expr | callStmt
 // callStmt   := IDENT arg*
-// arg        := additive   (a value: number, "word", name, (bracket), -5)
 // ifStmt     := "if" expr newline block ("otherwise" newline block)? "end"
 // repeatStmt := "repeat" expr "times" newline block "end"
 // recipeDef  := "recipe" IDENT IDENT* newline block "end"
@@ -106,9 +98,9 @@ function tokenize(src) {
 // factor     := "-" factor | primary
 // primary    := NUMBER | STRING | IDENT | callExpr | "(" expr ")"
 //             | "[" (expr ("," expr)*)? "]" | primary "[" expr "]"
-// callExpr   := IDENT arg+   (an IDENT followed by a value starts a call)
+// callExpr   := IDENT arg+
 
-function parse(tokens) {
+function createParser(tokens) {
   let pos = 0;
   const peek = () => tokens[pos];
   const peek2 = () => tokens[pos + 1];
@@ -148,6 +140,16 @@ function parse(tokens) {
       while (peek().type === 'newline') next();
     }
     return { kind: 'program', stmts };
+  }
+
+  function parseExpression() {
+    const node = parseExpr();
+    while (peek().type === 'newline') next();
+    const t = peek();
+    if (t.type !== 'eof') {
+      throw new Error(`I didn't understand the end of that (line ${t.line})`);
+    }
+    return node;
   }
 
   function parseBlock() {
@@ -248,8 +250,6 @@ function parse(tokens) {
     return { kind: 'recipe', name, params, body };
   }
 
-  // An argument starts with a value. '-' is allowed here (add -5 3),
-  // because at statement level a '-' after a name can't be subtraction.
   function parseCallArgs() {
     const args = [];
     for (;;) {
@@ -333,7 +333,6 @@ function parse(tokens) {
     } else {
       throw new Error(`I expected a number, "word" or (bracket) here (line ${t.line})`);
     }
-    // looking inside:  fruits[0]
     while (isOp(peek(), '[')) {
       next();
       const idx = parseExpr();
@@ -357,7 +356,11 @@ function parse(tokens) {
     return { kind: 'list', items };
   }
 
-  return parseProgram();
+  return { parseProgram, parseExpression };
+}
+
+function parse(tokens) {
+  return createParser(tokens).parseProgram();
 }
 
 // ---------------- Interpreter ----------------
@@ -368,9 +371,11 @@ function deepEqual(a, b) {
   return a === b;
 }
 
-function run(program) {
-  const env = new Map();      // variables
-  const recipes = new Map();  // name -> { params, body }
+// A session remembers variables and recipes between runs —
+// that's what makes the interactive mode possible.
+function createSession() {
+  const env = new Map();
+  const recipes = new Map();
   let callDepth = 0;
 
   function evalNode(node) {
@@ -514,17 +519,110 @@ function run(program) {
     throw new Error(`Unknown statement '${s.kind}'`);
   }
 
-  const out = runBlock(program.stmts);
-  if (out.returned) throw new Error("'give back' only works inside a recipe");
+  return {
+    runProgram(program) {
+      const out = runBlock(program.stmts);
+      if (out.returned) throw new Error("'give back' only works inside a recipe");
+    },
+    evalExpr(src) {
+      const parser = createParser(tokenize(src));
+      return evalNode(parser.parseExpression());
+    },
+    stringify,
+  };
+}
+
+function run(program) {
+  createSession().runProgram(program);
+}
+
+// ---------------- Interactive mode ----------------
+function printHelp() {
+  console.log([
+    'MiniLang in 30 seconds:',
+    '  x = 10                  store a value',
+    '  print "hi " + x         show something',
+    '  if x bigger than 5      decide (finish with "end", "otherwise" for else)',
+    '  repeat 3 times          loop (finish with "end")',
+    '  recipe add a b          reuse steps ("give back" returns a value)',
+    '  fruits = ["a", "b"]     lists — look inside with fruits[0]',
+    'Just type and press Enter. Type "exit" to leave.',
+  ].join('\n'));
+}
+
+function startRepl() {
+  const readline = require('readline');
+  const session = createSession();
+  console.log('Welcome to MiniLang! Type "help" for help, "exit" to leave.');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const PROMPT = 'minilang> ', CONT = '... ';
+  let buffer = [];
+  rl.setPrompt(PROMPT);
+
+  // Is the user in the middle of an if/repeat/recipe block?
+  // Counted on tokens (not raw text), so words inside "quotes" don't confuse it.
+  function blockIsOpen(src) {
+    try {
+      let depth = 0;
+      for (const t of tokenize(src)) {
+        if (t.type !== 'keyword') continue;
+        if (t.value === 'if' || t.value === 'repeat' || t.value === 'recipe') depth++;
+        else if (t.value === 'end') depth--;
+      }
+      return depth > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  rl.on('line', (rawLine) => {
+    const line = rawLine.trim();
+    if (buffer.length === 0 && line === '') { rl.prompt(); return; }
+    if (buffer.length === 0 && (line === 'exit' || line === 'quit')) { rl.close(); return; }
+    if (buffer.length === 0 && line === 'help') { printHelp(); rl.prompt(); return; }
+
+    buffer.push(rawLine);
+    const src = buffer.join('\n');
+
+    if (blockIsOpen(src)) {
+      rl.setPrompt(CONT); // block isn't finished — keep listening
+      rl.prompt();
+      return;
+    }
+
+    try {
+      session.runProgram(parse(tokenize(src)));
+    } catch (e) {
+      if (buffer.length === 1) {
+        // REPL convenience: a bare expression is shown, e.g.  2 + 3  ->  5
+        try {
+          console.log(session.stringify(session.evalExpr(src)));
+        } catch (e2) {
+          console.error('Error: ' + e.message);
+        }
+      } else {
+        console.error('Error: ' + e.message);
+      }
+    }
+    buffer = [];
+    rl.setPrompt(PROMPT);
+    rl.prompt();
+  });
+
+  rl.on('close', () => {
+    console.log('Bye! Keep building.');
+    process.exit(0);
+  });
+
+  rl.prompt();
 }
 
 // ---------------- Main ----------------
 function main() {
   const file = process.argv[2];
   if (!file) {
-    console.error('Usage: node minilang.js <file.ml>');
-    console.error('MiniLang is simple:  x = 10   and   print "hi"   — one per line.');
-    process.exit(1);
+    startRepl();
+    return;
   }
   try {
     const src = fs.readFileSync(file, 'utf8');
