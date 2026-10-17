@@ -3,11 +3,18 @@
 /*
  * MiniLang — a tiny programming language anyone can learn in 5 minutes.
  *
- * Only two things to learn:
- *   1. Store a value:   x = 10
- *   2. Show something:  print "Hello"
+ * Stage 1: store values (x = 10), show things (print "hi"), maths.
+ * Stage 2: decisions and loops, all in plain words:
  *
- * No 'let', no semicolons, one statement per line. That's the whole language.
+ *   if age bigger than 18
+ *     print "adult"
+ *   otherwise
+ *     print "young"
+ *   end
+ *
+ *   repeat 3 times
+ *     print "hello"
+ *   end
  *
  * Usage: node minilang.js <file.ml>
  */
@@ -15,6 +22,9 @@
 const fs = require('fs');
 
 // ---------------- Tokenizer ----------------
+const KEYWORDS = ['let', 'print', 'if', 'otherwise', 'end', 'repeat', 'times',
+                  'bigger', 'smaller', 'than', 'equals', 'not'];
+
 function tokenize(src) {
   const tokens = [];
   let i = 0, line = 1;
@@ -25,7 +35,7 @@ function tokenize(src) {
   while (i < src.length) {
     const c = src[i];
     if (c === '\n') { tokens.push({ type: 'newline', line }); line++; i++; continue; }
-    if (c === ' ' || c === '\t' || c === '\r' || c === ';') { i++; continue; } // ; is optional, ignored
+    if (c === ' ' || c === '\t' || c === '\r' || c === ';') { i++; continue; }
     if (c === '#' || (c === '/' && src[i + 1] === '/')) {
       while (i < src.length && src[i] !== '\n') i++;
       continue;
@@ -61,35 +71,50 @@ function tokenize(src) {
       let j = i;
       while (j < src.length && (isAlpha(src[j]) || isDigit(src[j]))) j++;
       const word = src.slice(i, j);
-      tokens.push({ type: word === 'let' || word === 'print' ? 'keyword' : 'ident', value: word, line });
+      tokens.push({ type: KEYWORDS.includes(word) ? 'keyword' : 'ident', value: word, line });
       i = j; continue;
     }
 
     if ('+-*/%()='.includes(c)) { tokens.push({ type: 'op', value: c, line }); i++; continue; }
-    throw new Error(at(`I don't understand '${c}' — MiniLang only uses letters, numbers, "quotes" and + - * / % ( ) =`));
+    throw new Error(at(`I don't understand '${c}' — MiniLang only uses plain words, "quotes" and + - * / % ( ) =`));
   }
   tokens.push({ type: 'eof', line });
   return tokens;
 }
 
 // ---------------- Parser ----------------
-// program   := (statement newline*)*
-// statement := IDENT "=" expr | "print" expr        (one per line)
-// expr      := term (("+" | "-") term)*
-// term      := factor (("*" | "/" | "%") factor)*
-// factor    := "-" factor | primary
-// primary   := NUMBER | STRING | IDENT | "(" expr ")"
+// program    := (statement newline*)*
+// statement  := IDENT "=" expr | "print" expr | ifStmt | repeatStmt
+// ifStmt     := "if" expr newline block ("otherwise" newline block)? "end"
+// repeatStmt := "repeat" expr "times" newline block "end"
+// block      := (statement newline*)*
+// expr       := comparison
+// comparison := additive ((bigger than | smaller than | equals | not equals) additive)*
+// additive   := term (("+" | "-") term)*
+// term       := factor (("*" | "/" | "%") factor)*
+// factor     := "-" factor | primary
+// primary    := NUMBER | STRING | IDENT | "(" expr ")"
 
 function parse(tokens) {
   let pos = 0;
   const peek = () => tokens[pos];
+  const peek2 = () => tokens[pos + 1];
   const next = () => tokens[pos++];
+  const isKw = (t, w) => t.type === 'keyword' && t.value === w;
 
   function endOfLine() {
     const n = peek();
     if (n.type === 'newline') { next(); return; }
     if (n.type === 'eof') return;
     throw new Error(`One statement per line, please (line ${n.line})`);
+  }
+
+  function expectNewline(kw, what) {
+    const n = peek();
+    if (n.type !== 'newline') {
+      throw new Error(`Put ${what} on the next line (line ${kw.line})`);
+    }
+    next();
   }
 
   function parseProgram() {
@@ -102,16 +127,34 @@ function parse(tokens) {
     return { kind: 'program', stmts };
   }
 
+  function parseBlock() {
+    const stmts = [];
+    while (peek().type === 'newline') next();
+    for (;;) {
+      const t = peek();
+      if (t.type === 'eof') throw new Error("Missing 'end' — every 'if' and 'repeat' needs one at the finish");
+      if (t.type === 'keyword' && (t.value === 'end' || t.value === 'otherwise')) break;
+      stmts.push(parseStatement());
+      while (peek().type === 'newline') next();
+    }
+    return stmts;
+  }
+
   function parseStatement() {
     const t = peek();
-    if (t.type === 'keyword' && t.value === 'let') {
-      throw new Error(`No 'let' needed in MiniLang (line ${t.line}) — just write:  x = 5`);
-    }
-    if (t.type === 'keyword' && t.value === 'print') {
-      next();
-      const expr = parseExpr();
-      endOfLine();
-      return { kind: 'print', expr };
+    if (t.type === 'keyword') {
+      if (t.value === 'let') {
+        throw new Error(`No 'let' needed in MiniLang (line ${t.line}) — just write:  x = 5`);
+      }
+      if (t.value === 'print') {
+        next();
+        const expr = parseExpr();
+        endOfLine();
+        return { kind: 'print', expr };
+      }
+      if (t.value === 'if') return parseIf();
+      if (t.value === 'repeat') return parseRepeat();
+      throw new Error(`'${t.value}' is a special MiniLang word — use another name (line ${t.line})`);
     }
     if (t.type === 'ident') {
       const name = next().value;
@@ -122,12 +165,68 @@ function parse(tokens) {
         endOfLine();
         return { kind: 'let', name, expr };
       }
-      throw new Error(`Did you mean '${name} = ...'? Every line stores a value or prints one (line ${t.line})`);
+      throw new Error(`Did you mean '${name} = ...'? Every line stores a value, prints one, or starts if/repeat (line ${t.line})`);
     }
-    throw new Error(`Each line is either:  name = value   or   print something   (line ${t.line})`);
+    throw new Error(`Each line is:  name = value   or   print something   or   if.../repeat... (line ${t.line})`);
   }
 
-  function parseExpr() {
+  function parseIf() {
+    const kw = next(); // 'if'
+    const cond = parseExpr();
+    expectNewline(kw, 'what happens');
+    const thenBlock = parseBlock();
+    let elseBlock = [];
+    if (isKw(peek(), 'otherwise')) {
+      next();
+      expectNewline(kw, 'the other option');
+      elseBlock = parseBlock();
+    }
+    const endTok = peek();
+    if (!isKw(endTok, 'end')) {
+      throw new Error(`An 'if' needs 'end' at the finish (line ${kw.line})`);
+    }
+    next();
+    endOfLine();
+    return { kind: 'if', cond, thenBlock, elseBlock };
+  }
+
+  function parseRepeat() {
+    const kw = next(); // 'repeat'
+    const count = parseExpr();
+    if (!isKw(peek(), 'times')) {
+      throw new Error(`Write it like:  repeat 5 times  (line ${kw.line})`);
+    }
+    next();
+    expectNewline(kw, 'what to repeat');
+    const body = parseBlock();
+    const endTok = peek();
+    if (!isKw(endTok, 'end')) {
+      throw new Error(`A 'repeat' needs 'end' at the finish (line ${kw.line})`);
+    }
+    next();
+    endOfLine();
+    return { kind: 'repeat', count, body };
+  }
+
+  function parseExpr() { return parseComparison(); }
+
+  function parseComparison() {
+    let node = parseAdditive();
+    for (;;) {
+      const t = peek(), u = peek2();
+      let op = null, words = 0;
+      if (isKw(t, 'bigger') && isKw(u, 'than')) { op = 'bigger than'; words = 2; }
+      else if (isKw(t, 'smaller') && isKw(u, 'than')) { op = 'smaller than'; words = 2; }
+      else if (isKw(t, 'equals')) { op = 'equals'; words = 1; }
+      else if (isKw(t, 'not') && isKw(u, 'equals')) { op = 'not equals'; words = 2; }
+      else break;
+      for (let k = 0; k < words; k++) next();
+      node = { kind: 'binop', op, left: node, right: parseAdditive() };
+    }
+    return node;
+  }
+
+  function parseAdditive() {
     let node = parseTerm();
     while (peek().type === 'op' && (peek().value === '+' || peek().value === '-')) {
       const op = next().value;
@@ -192,6 +291,16 @@ function run(program) {
         if (node.op === '+' && (typeof l === 'string' || typeof r === 'string')) {
           return String(l) + String(r);
         }
+        switch (node.op) {
+          case 'equals': return l === r;
+          case 'not equals': return l !== r;
+          case 'bigger than':
+          case 'smaller than':
+            if (typeof l !== 'number' || typeof r !== 'number') {
+              throw new Error(`'${node.op}' compares numbers — try:  if age bigger than 18`);
+            }
+            return node.op === 'bigger than' ? l > r : l < r;
+        }
         if (typeof l !== 'number' || typeof r !== 'number') {
           throw new Error(`'${node.op}' works on numbers (or join words with +)`);
         }
@@ -215,10 +324,29 @@ function run(program) {
     return String(v);
   }
 
-  for (const s of program.stmts) {
+  function runBlock(stmts) {
+    for (const s of stmts) runStatement(s);
+  }
+
+  function runStatement(s) {
     if (s.kind === 'let') env.set(s.name, evalNode(s.expr));
     else if (s.kind === 'print') console.log(stringify(evalNode(s.expr)));
+    else if (s.kind === 'if') {
+      const c = evalNode(s.cond);
+      if (typeof c !== 'boolean') {
+        throw new Error("'if' needs a comparison — like:  if age bigger than 18");
+      }
+      runBlock(c ? s.thenBlock : s.elseBlock);
+    } else if (s.kind === 'repeat') {
+      const n = evalNode(s.count);
+      if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
+        throw new Error("'repeat' needs a whole number — like:  repeat 3 times");
+      }
+      for (let k = 0; k < n; k++) runBlock(s.body);
+    }
   }
+
+  runBlock(program.stmts);
 }
 
 // ---------------- Main ----------------
