@@ -2,7 +2,7 @@
 
 A tiny programming language anyone can learn in 5 minutes — tokenizer, parser, and interpreter in a single file of vanilla JavaScript. No libraries, no shortcuts.
 
-There are only **four things to learn**:
+There are only **six things to learn**:
 
 | What | How | Example |
 | ---- | --- | ------- |
@@ -10,8 +10,10 @@ There are only **four things to learn**:
 | Show something | `print something` | `print "Hello"` |
 | Decide | `if ... otherwise ... end` | `if age bigger than 18` |
 | Repeat | `repeat N times ... end` | `repeat 3 times` |
+| Reuse | `recipe ... end`, then use it | `recipe greet name` |
+| Group things | `[item, item]` | `fruits = ["apple", "banana"]` |
 
-That's it. No `let`, no semicolons, no symbols for comparisons — just plain words.
+That's the whole language. No `let`, no semicolons, no symbols for comparisons — just plain words.
 
 ```python
 # hello.ml
@@ -28,6 +30,28 @@ otherwise
 end
 ```
 
+```python
+# recipes.ml
+recipe greet name
+  print "Hello, " + name + "!"
+end
+
+greet "Alan"
+
+recipe add a b
+  give back a + b
+end
+
+print add 2 3
+```
+
+```python
+# lists.ml
+fruits = ["apple", "banana", "mango"]
+print fruits[0]      # apple — positions start at 0
+print fruits + ["grapes"]
+```
+
 Run it:
 
 ```bash
@@ -41,6 +65,8 @@ node minilang.js examples/hello.ml
 - **Comments** start with `#`.
 - **Decisions:** `if x bigger than 5` ... `otherwise` ... `end`. Comparisons are plain words: `bigger than`, `smaller than`, `equals`, `not equals`.
 - **Loops:** `repeat 3 times` ... `end`. Blocks can nest inside each other.
+- **Recipes:** bundle steps under a name and reuse them. `recipe add a b` ... `give back a + b` ... `end`, then `add 2 3`. Recipes can even call themselves.
+- **Lists:** `fruits = ["apple", "banana"]`, look inside with `fruits[0]`, join with `+`.
 - Mistakes get friendly errors that teach you, e.g. writing `let x = 5` tells you: *"No 'let' needed in MiniLang — just write: x = 5"*.
 
 ## How It Works
@@ -58,8 +84,11 @@ source code  →  tokenizer  →  tokens  →  parser  →  AST  →  interprete
 ```
 program    := (statement newline*)*
 statement  := IDENT "=" expr | "print" expr | ifStmt | repeatStmt
+             | recipeDef | "give" "back" expr | callStmt
+callStmt   := IDENT arg*              (a name followed by values is a call)
 ifStmt     := "if" expr newline block ("otherwise" newline block)? "end"
 repeatStmt := "repeat" expr "times" newline block "end"
+recipeDef  := "recipe" IDENT IDENT* newline block "end"
 block      := (statement newline*)*
 expr       := comparison
 comparison := additive ((bigger than | smaller than | equals | not equals) additive)*
@@ -72,10 +101,12 @@ primary    := NUMBER | STRING | IDENT | "(" expr ")"
 ## Try It
 
 ```bash
-node minilang.js examples/hello.ml   # words & variables
-node minilang.js examples/math.ml    # maths & brackets
-node minilang.js examples/conditions.ml  # if / otherwise
-node minilang.js examples/loop.ml    # repeat loops
+node minilang.js examples/hello.ml      # words & variables
+node minilang.js examples/math.ml       # maths & brackets
+node minilang.js examples/conditions.ml # if / otherwise
+node minilang.js examples/loop.ml       # repeat loops
+node minilang.js examples/recipes.ml    # reusable recipes
+node minilang.js examples/lists.ml      # lists
 ```
 
 ## Project Structure
@@ -84,7 +115,11 @@ node minilang.js examples/loop.ml    # repeat loops
 ├── minilang.js      # the whole language: tokenizer, parser, interpreter
 ├── examples/
 │   ├── hello.ml     # words & variables
-│   └── math.ml      # maths & brackets
+│   ├── math.ml      # maths & brackets
+│   ├── conditions.ml# if / otherwise decisions
+│   ├── loop.ml      # repeat loops
+│   ├── recipes.ml   # reusable recipes (functions)
+│   └── lists.ml     # lists
 └── README.md
 ```
 
@@ -92,7 +127,7 @@ node minilang.js examples/loop.ml    # repeat loops
 
 - ✅ **Stage 1:** values, variables, print, maths
 - ✅ **Stage 2:** decisions (`if`/`otherwise`) and loops (`repeat`), all in plain words
-- **Stage 3:** reusable `recipe` blocks (functions), lists
+- ✅ **Stage 3:** reusable `recipe` blocks (functions) with `give back`, and lists
 - **Stage 4:** interactive mode — type and see results instantly
 
 ## Tech Stack

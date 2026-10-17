@@ -4,17 +4,23 @@
  * MiniLang — a tiny programming language anyone can learn in 5 minutes.
  *
  * Stage 1: store values (x = 10), show things (print "hi"), maths.
- * Stage 2: decisions and loops, all in plain words:
+ * Stage 2: decisions (if/otherwise/end) and loops (repeat/end) in plain words.
+ * Stage 3: reusable recipes (functions) with "give back", and lists.
  *
- *   if age bigger than 18
- *     print "adult"
- *   otherwise
- *     print "young"
+ *   recipe greet name
+ *     print "Hello, " + name + "!"
  *   end
  *
- *   repeat 3 times
- *     print "hello"
+ *   greet "Alan"
+ *
+ *   recipe add a b
+ *     give back a + b
  *   end
+ *
+ *   print add 2 3
+ *
+ *   fruits = ["apple", "banana"]
+ *   print fruits[0]
  *
  * Usage: node minilang.js <file.ml>
  */
@@ -23,7 +29,8 @@ const fs = require('fs');
 
 // ---------------- Tokenizer ----------------
 const KEYWORDS = ['let', 'print', 'if', 'otherwise', 'end', 'repeat', 'times',
-                  'bigger', 'smaller', 'than', 'equals', 'not'];
+                  'bigger', 'smaller', 'than', 'equals', 'not',
+                  'recipe', 'give', 'back'];
 
 function tokenize(src) {
   const tokens = [];
@@ -75,8 +82,8 @@ function tokenize(src) {
       i = j; continue;
     }
 
-    if ('+-*/%()='.includes(c)) { tokens.push({ type: 'op', value: c, line }); i++; continue; }
-    throw new Error(at(`I don't understand '${c}' — MiniLang only uses plain words, "quotes" and + - * / % ( ) =`));
+    if ('+-*/%()=;[],'.includes(c)) { tokens.push({ type: 'op', value: c, line }); i++; continue; }
+    throw new Error(at(`I don't understand '${c}' — MiniLang only uses plain words, "quotes" and + - * / % ( ) = [ ] ,`));
   }
   tokens.push({ type: 'eof', line });
   return tokens;
@@ -85,15 +92,21 @@ function tokenize(src) {
 // ---------------- Parser ----------------
 // program    := (statement newline*)*
 // statement  := IDENT "=" expr | "print" expr | ifStmt | repeatStmt
+//             | recipeDef | "give" "back" expr | callStmt
+// callStmt   := IDENT arg*
+// arg        := additive   (a value: number, "word", name, (bracket), -5)
 // ifStmt     := "if" expr newline block ("otherwise" newline block)? "end"
 // repeatStmt := "repeat" expr "times" newline block "end"
+// recipeDef  := "recipe" IDENT IDENT* newline block "end"
 // block      := (statement newline*)*
 // expr       := comparison
 // comparison := additive ((bigger than | smaller than | equals | not equals) additive)*
 // additive   := term (("+" | "-") term)*
 // term       := factor (("*" | "/" | "%") factor)*
 // factor     := "-" factor | primary
-// primary    := NUMBER | STRING | IDENT | "(" expr ")"
+// primary    := NUMBER | STRING | IDENT | callExpr | "(" expr ")"
+//             | "[" (expr ("," expr)*)? "]" | primary "[" expr "]"
+// callExpr   := IDENT arg+   (an IDENT followed by a value starts a call)
 
 function parse(tokens) {
   let pos = 0;
@@ -101,6 +114,7 @@ function parse(tokens) {
   const peek2 = () => tokens[pos + 1];
   const next = () => tokens[pos++];
   const isKw = (t, w) => t.type === 'keyword' && t.value === w;
+  const isOp = (t, v) => t.type === 'op' && t.value === v;
 
   function endOfLine() {
     const n = peek();
@@ -115,6 +129,15 @@ function parse(tokens) {
       throw new Error(`Put ${what} on the next line (line ${kw.line})`);
     }
     next();
+  }
+
+  function expectEnd(kw, what) {
+    const endTok = peek();
+    if (!isKw(endTok, 'end')) {
+      throw new Error(`A '${what}' needs 'end' at the finish (line ${kw.line})`);
+    }
+    next();
+    endOfLine();
   }
 
   function parseProgram() {
@@ -132,7 +155,7 @@ function parse(tokens) {
     while (peek().type === 'newline') next();
     for (;;) {
       const t = peek();
-      if (t.type === 'eof') throw new Error("Missing 'end' — every 'if' and 'repeat' needs one at the finish");
+      if (t.type === 'eof') throw new Error("Missing 'end' — every 'if', 'repeat' and 'recipe' needs one at the finish");
       if (t.type === 'keyword' && (t.value === 'end' || t.value === 'otherwise')) break;
       stmts.push(parseStatement());
       while (peek().type === 'newline') next();
@@ -154,20 +177,28 @@ function parse(tokens) {
       }
       if (t.value === 'if') return parseIf();
       if (t.value === 'repeat') return parseRepeat();
+      if (t.value === 'recipe') return parseRecipe();
+      if (t.value === 'give' && isKw(peek2(), 'back')) {
+        next(); next();
+        const expr = parseExpr();
+        endOfLine();
+        return { kind: 'giveback', expr };
+      }
       throw new Error(`'${t.value}' is a special MiniLang word — use another name (line ${t.line})`);
     }
     if (t.type === 'ident') {
       const name = next().value;
-      const eq = peek();
-      if (eq.type === 'op' && eq.value === '=') {
+      if (isOp(peek(), '=')) {
         next();
         const expr = parseExpr();
         endOfLine();
         return { kind: 'let', name, expr };
       }
-      throw new Error(`Did you mean '${name} = ...'? Every line stores a value, prints one, or starts if/repeat (line ${t.line})`);
+      const args = parseCallArgs();
+      endOfLine();
+      return { kind: 'call', name, args };
     }
-    throw new Error(`Each line is:  name = value   or   print something   or   if.../repeat... (line ${t.line})`);
+    throw new Error(`Each line is:  name = value   or   print something   or   if... / repeat... / recipe... (line ${t.line})`);
   }
 
   function parseIf() {
@@ -181,12 +212,7 @@ function parse(tokens) {
       expectNewline(kw, 'the other option');
       elseBlock = parseBlock();
     }
-    const endTok = peek();
-    if (!isKw(endTok, 'end')) {
-      throw new Error(`An 'if' needs 'end' at the finish (line ${kw.line})`);
-    }
-    next();
-    endOfLine();
+    expectEnd(kw, 'if');
     return { kind: 'if', cond, thenBlock, elseBlock };
   }
 
@@ -199,13 +225,41 @@ function parse(tokens) {
     next();
     expectNewline(kw, 'what to repeat');
     const body = parseBlock();
-    const endTok = peek();
-    if (!isKw(endTok, 'end')) {
-      throw new Error(`A 'repeat' needs 'end' at the finish (line ${kw.line})`);
-    }
-    next();
-    endOfLine();
+    expectEnd(kw, 'repeat');
     return { kind: 'repeat', count, body };
+  }
+
+  function parseRecipe() {
+    const kw = next(); // 'recipe'
+    const nameTok = peek();
+    if (nameTok.type !== 'ident') {
+      throw new Error(`Give your recipe a name — like:  recipe greet  (line ${kw.line})`);
+    }
+    const name = next().value;
+    const params = [];
+    while (peek().type === 'ident') params.push(next().value);
+    const bad = peek();
+    if (bad.type !== 'newline' && bad.type !== 'eof') {
+      throw new Error(`Recipe ingredients must be plain names — like:  recipe add a b  (line ${kw.line})`);
+    }
+    expectNewline(kw, 'the recipe steps');
+    const body = parseBlock();
+    expectEnd(kw, 'recipe');
+    return { kind: 'recipe', name, params, body };
+  }
+
+  // An argument starts with a value. '-' is allowed here (add -5 3),
+  // because at statement level a '-' after a name can't be subtraction.
+  function parseCallArgs() {
+    const args = [];
+    for (;;) {
+      const t = peek();
+      const startsArg = t.type === 'number' || t.type === 'string' || t.type === 'ident' ||
+        (t.type === 'op' && (t.value === '(' || t.value === '-' || t.value === '['));
+      if (!startsArg) break;
+      args.push(parseAdditive());
+    }
+    return args;
   }
 
   function parseExpr() { return parseComparison(); }
@@ -254,52 +308,149 @@ function parse(tokens) {
 
   function parsePrimary() {
     const t = next();
-    if (t.type === 'number' || t.type === 'string') return { kind: 'lit', value: t.value };
-    if (t.type === 'ident') return { kind: 'var', name: t.value };
-    if (t.type === 'op' && t.value === '(') {
-      const node = parseExpr();
-      const closing = peek();
-      if (closing.type !== 'op' || closing.value !== ')') {
-        throw new Error(`Missing closing bracket ')' (line ${t.line})`);
+    let node;
+    if (t.type === 'number' || t.type === 'string') {
+      node = { kind: 'lit', value: t.value };
+    } else if (t.type === 'ident') {
+      // A name followed by a value starts a call:  add 2 3
+      // (but '-' doesn't — that's subtraction:  x - 5;
+      //  and '[' doesn't — that's looking inside:  fruits[0])
+      const u = peek();
+      const startsArg = u.type === 'number' || u.type === 'string' || u.type === 'ident' ||
+        (u.type === 'op' && u.value === '(');
+      if (startsArg) {
+        node = { kind: 'call', name: t.value, args: parseCallArgs() };
+      } else {
+        node = { kind: 'var', name: t.value };
       }
+    } else if (isOp(t, '(')) {
+      node = parseExpr();
+      const closing = peek();
+      if (!isOp(closing, ')')) throw new Error(`Missing closing bracket ')' (line ${t.line})`);
       next();
-      return node;
+    } else if (isOp(t, '[')) {
+      node = parseListLiteral(t);
+    } else {
+      throw new Error(`I expected a number, "word" or (bracket) here (line ${t.line})`);
     }
-    throw new Error(`I expected a number, "word" or (bracket) here (line ${t.line})`);
+    // looking inside:  fruits[0]
+    while (isOp(peek(), '[')) {
+      next();
+      const idx = parseExpr();
+      if (!isOp(peek(), ']')) throw new Error(`Missing ']' after the position (line ${t.line})`);
+      next();
+      node = { kind: 'index', list: node, index: idx };
+    }
+    return node;
+  }
+
+  function parseListLiteral(t) {
+    const items = [];
+    if (isOp(peek(), ']')) { next(); return { kind: 'list', items }; }
+    for (;;) {
+      items.push(parseExpr());
+      const c = peek();
+      if (isOp(c, ',')) { next(); continue; }
+      if (isOp(c, ']')) { next(); break; }
+      throw new Error(`Lists need commas between items and ']' at the end (line ${t.line})`);
+    }
+    return { kind: 'list', items };
   }
 
   return parseProgram();
 }
 
 // ---------------- Interpreter ----------------
+function deepEqual(a, b) {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
+  }
+  return a === b;
+}
+
 function run(program) {
-  const env = new Map();
+  const env = new Map();      // variables
+  const recipes = new Map();  // name -> { params, body }
+  let callDepth = 0;
 
   function evalNode(node) {
     switch (node.kind) {
       case 'lit': return node.value;
+      case 'list': return node.items.map(evalNode);
       case 'var':
-        if (!env.has(node.name)) throw new Error(`I don't know '${node.name}' yet — store it first like: ${node.name} = 5`);
+        if (recipes.has(node.name)) {
+          throw new Error(`'${node.name}' is a recipe — use it like:  ${node.name} ...`);
+        }
+        if (!env.has(node.name)) {
+          throw new Error(`I don't know '${node.name}' yet — store it first like: ${node.name} = 5`);
+        }
         return env.get(node.name);
+      case 'index': {
+        const l = evalNode(node.list), k = evalNode(node.index);
+        if (!Array.isArray(l)) throw new Error('You can only look inside a list like this:  fruits[0]');
+        if (typeof k !== 'number' || !Number.isInteger(k)) {
+          throw new Error('List positions are whole numbers, starting at 0');
+        }
+        if (k < 0 || k >= l.length) {
+          throw new Error(`That list has ${l.length} item(s) — positions 0 to ${l.length - 1}`);
+        }
+        return l[k];
+      }
       case 'neg': {
         const v = evalNode(node.expr);
         if (typeof v !== 'number') throw new Error('Can only put minus before a number');
         return -v;
+      }
+      case 'call': {
+        const r = recipes.get(node.name);
+        if (!r) {
+          if (env.has(node.name)) {
+            throw new Error(`'${node.name}' holds a value, it's not a recipe — to show it:  print ${node.name}`);
+          }
+          throw new Error(`I don't know '${node.name}' — first make it:\n  recipe ${node.name} ...\n  end`);
+        }
+        if (node.args.length !== r.params.length) {
+          throw new Error(`'${node.name}' needs ${r.params.length} ingredient(s) — you gave ${node.args.length}`);
+        }
+        if (callDepth > 200) {
+          throw new Error(`'${node.name}' keeps calling itself forever — check your 'if' stopping rule`);
+        }
+        const argVals = node.args.map(evalNode);
+        const saved = new Map();
+        for (let k = 0; k < r.params.length; k++) {
+          const p = r.params[k];
+          if (env.has(p)) saved.set(p, env.get(p));
+          env.set(p, argVals[k]);
+        }
+        callDepth++;
+        let result = null;
+        try {
+          const out = runBlock(r.body);
+          if (out.returned) result = out.value;
+        } finally {
+          callDepth--;
+          for (const p of r.params) {
+            if (saved.has(p)) env.set(p, saved.get(p));
+            else env.delete(p);
+          }
+        }
+        return result;
       }
       case 'binop': {
         const l = evalNode(node.left), r = evalNode(node.right);
         if (node.op === '+' && (typeof l === 'string' || typeof r === 'string')) {
           return String(l) + String(r);
         }
-        switch (node.op) {
-          case 'equals': return l === r;
-          case 'not equals': return l !== r;
-          case 'bigger than':
-          case 'smaller than':
-            if (typeof l !== 'number' || typeof r !== 'number') {
-              throw new Error(`'${node.op}' compares numbers — try:  if age bigger than 18`);
-            }
-            return node.op === 'bigger than' ? l > r : l < r;
+        if (node.op === '+' && Array.isArray(l) && Array.isArray(r)) {
+          return [...l, ...r];
+        }
+        if (node.op === 'equals') return deepEqual(l, r);
+        if (node.op === 'not equals') return !deepEqual(l, r);
+        if (node.op === 'bigger than' || node.op === 'smaller than') {
+          if (typeof l !== 'number' || typeof r !== 'number') {
+            throw new Error(`'${node.op}' compares numbers — try:  if age bigger than 18`);
+          }
+          return node.op === 'bigger than' ? l > r : l < r;
         }
         if (typeof l !== 'number' || typeof r !== 'number') {
           throw new Error(`'${node.op}' works on numbers (or join words with +)`);
@@ -320,33 +471,51 @@ function run(program) {
   }
 
   function stringify(v) {
+    if (Array.isArray(v)) return '[' + v.map(stringify).join(', ') + ']';
     if (typeof v === 'number') return String(parseFloat(v.toPrecision(12)));
+    if (v === null || v === undefined) return 'nothing';
     return String(v);
   }
 
   function runBlock(stmts) {
-    for (const s of stmts) runStatement(s);
+    for (const s of stmts) {
+      const r = runStatement(s);
+      if (r && r.returned) return r;
+    }
+    return { returned: false, value: null };
   }
 
   function runStatement(s) {
-    if (s.kind === 'let') env.set(s.name, evalNode(s.expr));
-    else if (s.kind === 'print') console.log(stringify(evalNode(s.expr)));
-    else if (s.kind === 'if') {
+    if (s.kind === 'let') { env.set(s.name, evalNode(s.expr)); return; }
+    if (s.kind === 'print') { console.log(stringify(evalNode(s.expr))); return; }
+    if (s.kind === 'recipe') { recipes.set(s.name, s); return; }
+    if (s.kind === 'giveback') { return { returned: true, value: evalNode(s.expr) }; }
+    if (s.kind === 'call') { evalNode(s); return; }
+    if (s.kind === 'if') {
       const c = evalNode(s.cond);
       if (typeof c !== 'boolean') {
         throw new Error("'if' needs a comparison — like:  if age bigger than 18");
       }
-      runBlock(c ? s.thenBlock : s.elseBlock);
-    } else if (s.kind === 'repeat') {
+      const out = runBlock(c ? s.thenBlock : s.elseBlock);
+      if (out.returned) return out;
+      return;
+    }
+    if (s.kind === 'repeat') {
       const n = evalNode(s.count);
       if (typeof n !== 'number' || !Number.isInteger(n) || n < 0) {
         throw new Error("'repeat' needs a whole number — like:  repeat 3 times");
       }
-      for (let k = 0; k < n; k++) runBlock(s.body);
+      for (let k = 0; k < n; k++) {
+        const out = runBlock(s.body);
+        if (out.returned) return out;
+      }
+      return;
     }
+    throw new Error(`Unknown statement '${s.kind}'`);
   }
 
-  runBlock(program.stmts);
+  const out = runBlock(program.stmts);
+  if (out.returned) throw new Error("'give back' only works inside a recipe");
 }
 
 // ---------------- Main ----------------
